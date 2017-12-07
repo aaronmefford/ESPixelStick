@@ -32,7 +32,7 @@ const char BUILD_DATE[] = __DATE__;
 //#define ESPS_MODE_SERIAL
 
 /* Include support for PWM */
-//#define ESPS_SUPPORT_PWM
+#define ESPS_SUPPORT_PWM
 
 /*****************************************/
 /*         END - Configuration           */

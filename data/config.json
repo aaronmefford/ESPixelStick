@@ -5,7 +5,7 @@
     "ip": [
       192,
       168,
-      1,
+      254,
       10
     ],
     "netmask": [
@@ -17,11 +17,11 @@
     "gateway": [
       192,
       168,
-      1,
+      254,
       1
     ],
     "dhcp": true,
-    "ap_fallback": false
+    "ap_fallback": true
   },
 
   "device": {
@@ -44,6 +44,6 @@
 
   "serial": {
     "type": 0,
-    "baudrate": 57600
+    "baudrate": 115200
   }
 }
