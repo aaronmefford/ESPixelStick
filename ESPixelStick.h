@@ -20,24 +20,11 @@
 #ifndef ESPIXELSTICK_H_
 #define ESPIXELSTICK_H_
 
-const char VERSION[] = "3.1-dev (gece uart)";
+const char VERSION[] = "3.1-dev";
 const char BUILD_DATE[] = __DATE__;
 
-/*****************************************/
-/*        BEGIN - Configuration          */
-/*****************************************/
-
-/* Output Mode - There can be only one! (-Conor MacLeod) */
-#define ESPS_MODE_PIXEL
-//#define ESPS_MODE_SERIAL
-
-/* Include support for PWM */
-#define ESPS_SUPPORT_PWM
-
-/*****************************************/
-/*         END - Configuration           */
-/*****************************************/
-
+// Mode configuration moved to Mode.h to ease things with Travis
+#include "Mode.h"
 #include <ESP8266WiFi.h>
 #include <Ticker.h>
 #include <AsyncMqttClient.h>
@@ -52,10 +39,11 @@ const char BUILD_DATE[] = __DATE__;
 #include "SerialDriver.h"
 #endif
 
+#include "EffectEngine.h"
+
 #define HTTP_PORT       80      /* Default web server port */
 #define MQTT_PORT       1883    /* Default MQTT port */
-#define DATA_PIN        2       /* Pixel output - GPIO2 */
-#define EEPROM_BASE     0       /* EEPROM configuration base address */
+#define DATA_PIN        2       /* Pixel output - GPIO2 (D4 on NodeMCU) */
 #define UNIVERSE_MAX    512     /* Max channels in a DMX Universe */
 #define PIXEL_LIMIT     1360    /* Total pixel limit - 40.85ms for 8 universes */
 #define RENARD_LIMIT    2048    /* Channel limit for serial outputs */
@@ -64,56 +52,40 @@ const char BUILD_DATE[] = __DATE__;
 #define REBOOT_DELAY    100     /* Delay for rebooting once reboot flag is set */
 #define LOG_PORT        Serial  /* Serial port for console logging */
 
-/* E1.33 / RDMnet stuff - to be moved to library */
+// E1.33 / RDMnet stuff - to be moved to library
 #define RDMNET_DNSSD_SRV_TYPE   "draft-e133.tcp"
 #define RDMNET_DEFAULT_SCOPE    "default"
 #define RDMNET_DEFAULT_DOMAIN   "local"
 #define RDMNET_DNSSD_TXTVERS    1
 #define RDMNET_DNSSD_E133VERS   1
 
-/* Configuration file params */
+// Configuration file params
 #define CONFIG_MAX_SIZE 2048    /* Sanity limit for config file */
 
-/* Pixel Types */
+// Pixel Types
 class DevCap {
  public:
     bool MPIXEL : 1;
     bool MSERIAL : 1;
-    bool MPWM : 1;
     uint8_t toInt() {
-        return (MPWM << 2 | MSERIAL << 1 | MPIXEL);
+        return (MSERIAL << 1 | MPIXEL);
     }
 };
 
-/*
-enum class DevMode : uint8_t {
-    MPIXEL,
-    MSERIAL
-};
-*/
-
-/* Test Modes */
-enum class TestMode : uint8_t {
-    DISABLED,
-    STATIC,
-    CHASE,
-    RAINBOW,
-    VIEW_STREAM,
-    MQTT
+// Data Source to use
+enum class DataSource : uint8_t {
+    E131,
+    MQTT,
+    WEB
 };
 
-typedef struct {
-    uint8_t r, g, b;    /* Hold requested color */
-    uint16_t step;      /* Step in testing routine */
-    uint32_t last;      /* Last update */
-} testing_t;
-
-/* Configuration structure */
+// Configuration structure
 typedef struct {
     /* Device */
     String      id;             /* Device ID */
-    DevCap      devmode;        /* Device Mode - used for reporting mode, can't be set */
-    TestMode    testmode;       /* Testing mode */
+    DevCap      devmode;        /* Used for reporting device mode, not stored */
+    DataSource  ds;             /* Used to track current data source, not stored */
+
 
     /* Network */
     String      ssid;
@@ -152,20 +124,9 @@ typedef struct {
     SerialType  serial_type;    /* Serial type */
     BaudRate    baudrate;       /* Baudrate */
 #endif
-
-#if defined(ESPS_SUPPORT_PWM)
-    bool        pwm_global_enabled; /* is pwm runtime enabled? */
-    int         pwm_freq;           /* pwm frequency */
-    bool        pwm_gamma;          /* is pwm gamma enabled? */
-    uint16_t    pwm_gpio_dmx[17];   /* which dmx channel is gpio[n] mapped to? */
-    uint32_t    pwm_gpio_enabled;   /* is gpio[n] enabled? */
-    uint32_t    pwm_gpio_invert;    /* is gpio[n] active high or active low? */
-    uint32_t    pwm_gpio_digital;   /* is gpio[n] digital or "analog"? */
-#endif
 } config_t;
 
-
-/* Forward Declarations */
+// Forward Declarations
 void serializeConfig(String &jsonString, bool pretty = false, bool creds = false);
 void dsNetworkConfig(JsonObject &json);
 void dsDeviceConfig(JsonObject &json);
@@ -185,4 +146,4 @@ void publishRGBColor();
 void setStatic(uint8_t r, uint8_t g, uint8_t b,uint8_t waitTime);
 void setStatic(uint8_t r, uint8_t g, uint8_t b);
 
-#endif /* ESPIXELSTICK_H_ */
+#endif  // ESPIXELSTICK_H_

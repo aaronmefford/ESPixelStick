@@ -28,14 +28,13 @@ extern PixelDriver  pixels;     // Pixel object
 extern SerialDriver serial;     // Serial object
 #endif
 
+extern EffectEngine effects;    // EffectEngine for test modes
+
 extern ESPAsyncE131 e131;       // ESPAsyncE131 with X buffers
-extern testing_t    testing;    // Testing mode
 extern config_t     config;     // Current configuration
 extern uint32_t     *seqError;  // Sequence error tracking for each universe
 extern uint16_t     uniLast;    // Last Universe to listen for
 extern bool         reboot;     // Reboot flag
-
-
 
 
 /* 
@@ -44,12 +43,17 @@ extern bool         reboot;     // Reboot flag
 
     G1 - Get Config
     G2 - Get Config Status
-    
+
     T0 - Disable Testing
     T1 - Static Testing
-    T2 - Chase Test
-    T3 - Rainbow Test
-    T4 - View Stream
+    T2 - Blink Test
+    T3 - Flash Test
+    T4 - Chase Test
+    T5 - Rainbow Test
+    T6 - Fire flicker
+    T7 - Lightning
+    T8 - Breathe
+    T9 - View Stream
 
     S1 - Set Network Config
     S2 - Set Device Config
@@ -69,7 +73,7 @@ void procX(uint8_t *data, AsyncWebSocketClient *client) {
   //LOG_PORT.println(data[1]);
     switch (data[1]) {
         case 'S':
-            client->text("XS" + 
+            client->text("XS" +
                      (String)WiFi.RSSI() + ":" +
                      (String)ESP.getFreeHeap() + ":" +
                      (String)millis());
@@ -177,11 +181,15 @@ void procG(uint8_t *data, AsyncWebSocketClient *client) {
             json["realflashsize"] = (String)ESP.getFlashChipRealSize();
             json["freeheap"] = (String)ESP.getFreeHeap();
 
-            JsonObject &test = json.createNestedObject("testing");
-            test["mode"] = static_cast<uint8_t>(config.testmode);
-            test["r"] = testing.r;
-            test["g"] = testing.g;
-            test["b"] = testing.b;
+            JsonObject &effect = json.createNestedObject("effect");
+            effect["name"] = (String)effects.getEffect() ? effects.getEffect() : "";
+            effect["brightness"] = effects.getBrightness();
+            effect["speed"] = effects.getSpeed();
+            effect["r"] = effects.getColor().r;
+            effect["g"] = effects.getColor().g;
+            effect["b"] = effects.getColor().b;
+            effect["reverse"] = effects.getReverse();
+            effect["mirror"] = effects.getMirror();
 
             String response;
             json.printTo(response);
@@ -228,51 +236,118 @@ void procS(uint8_t *data, AsyncWebSocketClient *client) {
 }
 
 void procT(uint8_t *data, AsyncWebSocketClient *client) {
-    //LOG_PORT.print(F("ProcT WS: "));
-    //LOG_PORT.println(data[1]);
-
+    LOG_PORT.print(F("ProcT WS: "));
+    LOG_PORT.println(data[1]);
+    config.ds = DataSource::WEB;
     switch (data[1]) {
-        case '0':
-            config.testmode = TestMode::DISABLED;
-            // Clear whole string
-#if defined(ESPS_MODE_PIXEL)
-            for (int y =0; y < config.channel_count; y++)
-                pixels.setValue(y, 0);
-#elif defined(ESPS_MODE_SERIAL)
-            for (int y =0; y < config.channel_count; y++)
-                serial.setValue(y, 0);
-#endif
+        case '0': { // Clear whole string
+            //TODO: Store previous data source when effect is selected so we can switch back to it
+            config.ds = DataSource::E131;
+            effects.clearAll();
             break;
-
+        }
         case '1': {  // Static color
-            config.testmode = TestMode::STATIC;
-            testing.step = 0;
             DynamicJsonBuffer jsonBuffer;
             JsonObject &json = jsonBuffer.parseObject(reinterpret_cast<char*>(data + 2));
 
-            testing.r = json["r"];
-            testing.g = json["g"];
-            testing.b = json["b"];
+            if (json.containsKey("r") && json.containsKey("g") && json.containsKey("b")) {
+                effects.setColor({json["r"], json["g"], json["b"]});
+            }
+
+            effects.setEffect("Solid");
             break;
         }
-        case '2': {  // Chase
-            config.testmode = TestMode::CHASE;
-            testing.step = 0;
+        case '2': {  // Blink
             DynamicJsonBuffer jsonBuffer;
             JsonObject &json = jsonBuffer.parseObject(reinterpret_cast<char*>(data + 2));
 
-            testing.r = json["r"];
-            testing.g = json["g"];
-            testing.b = json["b"];
+            if (json.containsKey("r") && json.containsKey("g") && json.containsKey("b")) {
+                effects.setColor({json["r"], json["g"], json["b"]});
+            }
+
+            effects.setEffect("Blink");
             break;
         }
-        case '3':  // Rainbow
-            config.testmode = TestMode::RAINBOW;
-            testing.step = 0;
-            break;
+        case '3': {  // Flash
+            DynamicJsonBuffer jsonBuffer;
+            JsonObject &json = jsonBuffer.parseObject(reinterpret_cast<char*>(data + 2));
 
-        case '4': {  // View stream
-            config.testmode = TestMode::VIEW_STREAM;
+            if (json.containsKey("r") && json.containsKey("g") && json.containsKey("b")) {
+                effects.setColor({json["r"], json["g"], json["b"]});
+            }
+
+            effects.setEffect("Flash");
+            break;
+        }
+        case '4': {  // Chase
+            DynamicJsonBuffer jsonBuffer;
+            JsonObject &json = jsonBuffer.parseObject(reinterpret_cast<char*>(data + 2));
+
+            if (json.containsKey("r") && json.containsKey("g") && json.containsKey("b")) {
+                effects.setColor({json["r"], json["g"], json["b"]});
+            }
+
+            if (json.containsKey("reverse")) {
+                effects.setReverse(json["reverse"]);
+            }
+
+            if (json.containsKey("mirror")) {
+                effects.setMirror(json["mirror"]);
+            }
+
+            effects.setEffect("Chase");
+            break;
+        }
+        case '5': { // Rainbow
+            DynamicJsonBuffer jsonBuffer;
+            JsonObject &json = jsonBuffer.parseObject(reinterpret_cast<char*>(data + 2));
+
+            if (json.containsKey("reverse")) {
+                effects.setReverse(json["reverse"]);
+            }
+
+            if (json.containsKey("mirror")) {
+                effects.setMirror(json["mirror"]);
+            }
+
+            effects.setEffect("Rainbow");
+            break;
+        }
+        case '6': { // Fire flicker
+            DynamicJsonBuffer jsonBuffer;
+            JsonObject &json = jsonBuffer.parseObject(reinterpret_cast<char*>(data + 2));
+
+            if (json.containsKey("r") && json.containsKey("g") && json.containsKey("b")) {
+                effects.setColor({json["r"], json["g"], json["b"]});
+            }
+
+            effects.setEffect("Fire flicker");
+            break;
+        }
+        case '7': { // Lightning
+            DynamicJsonBuffer jsonBuffer;
+            JsonObject &json = jsonBuffer.parseObject(reinterpret_cast<char*>(data + 2));
+
+            if (json.containsKey("r") && json.containsKey("g") && json.containsKey("b")) {
+                effects.setColor({json["r"], json["g"], json["b"]});
+            }
+
+            effects.setEffect("Lightning");
+            break;
+        }
+        case '8': { // Breathe
+            DynamicJsonBuffer jsonBuffer;
+            JsonObject &json = jsonBuffer.parseObject(reinterpret_cast<char*>(data + 2));
+
+            if (json.containsKey("r") && json.containsKey("g") && json.containsKey("b")) {
+                effects.setColor({json["r"], json["g"], json["b"]});
+            }
+
+            effects.setEffect("Breathe");
+            break;
+        }
+
+        case '9': {  // View stream
 #if defined(ESPS_MODE_PIXEL)
             client->binary(pixels.getData(), config.channel_count);
 #elif defined(ESPS_MODE_SERIAL)
@@ -323,13 +398,13 @@ void wsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
     
     switch (type) {
         case WS_EVT_DATA: {
-            //LOG_PORT.print(F("WSEventData: "));
+            LOG_PORT.print(F("WSEventData: "));
             //LOG_PORT.print(data[0]);
             AwsFrameInfo *info = static_cast<AwsFrameInfo*>(arg);
             //LOG_PORT.print(info->final?F(" Final "):F(" Incomplete "));
             if (info->opcode == WS_TEXT) {
-                //LOG_PORT.print(F(" WSText: "));
-                //LOG_PORT.println(data[0]);
+                LOG_PORT.print(F(" WSText: "));
+                LOG_PORT.println(data[0]);
 
                 switch (data[0]) {
                     case 'X':

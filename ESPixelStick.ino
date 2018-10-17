@@ -21,8 +21,6 @@
 /*        BEGIN - Configuration          */
 /*****************************************/
 
-/* Output Mode has been moved to ESPixelStick.h */
-
 /* Fallback configuration if config.json is empty or fails */
 // Don't change the default, change ssid[]
 const char default_ssid[]       = "ESPPixelNet";
@@ -51,7 +49,6 @@ const char passphrase[] = "iwillobeytherules";
 #include "ESPixelStick.h"
 #include "EFUpdate.h"
 #include "wshandler.h"
-#include "pwm.h"
 #include "gamma.h"
 
 extern "C" {
@@ -76,31 +73,14 @@ static void _u0_putc(char c) {
 /////////////////////////////////////////////////////////
 
 // MQTT State
-const char MQTT_LIGHT_STATE_TOPIC[] = "/light/status";
-const char MQTT_LIGHT_COMMAND_TOPIC[] = "/light/switch";
-
-// MQTT Brightness
-const char MQTT_LIGHT_BRIGHTNESS_STATE_TOPIC[] = "/brightness/status";
-const char MQTT_LIGHT_BRIGHTNESS_COMMAND_TOPIC[] = "/brightness/set";
-
-// MQTT Colors (rgb)
-const char MQTT_LIGHT_RGB_STATE_TOPIC[] = "/rgb/status";
-const char MQTT_LIGHT_RGB_COMMAND_TOPIC[] = "/rgb/set";
+const char MQTT_SET_COMMAND_TOPIC[] = "/set";
 
 // MQTT Payloads by default (on/off)
 const char LIGHT_ON[] = "ON";
 const char LIGHT_OFF[] = "OFF";
 
-// MQTT variables used to store the state, the brightness and the color of the light
-boolean m_rgb_state = false;
-uint8_t m_rgb_brightness = 100;
-uint8_t m_rgb_red = 255;
-uint8_t m_rgb_green = 255;
-uint8_t m_rgb_blue = 255;
-
-// MQTT buffer used to send / receive data
-const uint8_t MSG_BUFFER_SIZE = 20;
-char m_msg_buffer[MSG_BUFFER_SIZE];
+// MQTT json buffer size
+const int JSON_BUFFER_SIZE = JSON_OBJECT_SIZE(10);
 
 // Configuration file
 const char CONFIG_FILE[] = "/config.json";
@@ -111,7 +91,6 @@ IPAddress ap_ip(172, 31, 255, 254);
 IPAddress ap_subnet(255, 255, 255, 0);
 
 ESPAsyncE131        e131(10);       // ESPAsyncE131 with X buffers
-testing_t           testing;        // Testing mode
 config_t            config;         // Current configuration
 uint32_t            *seqError;      // Sequence error tracking for each universe
 uint16_t            uniLast = 1;    // Last Universe to listen for
@@ -134,6 +113,7 @@ bool                asAP;
 bool                firstMessage;
 bool                asAPColorOn;
 uint32_t            asAPLastColor;     // Update asAP color timeout tracker
+EffectEngine        effects;    // Effects Engine
 
 // Output Drivers
 #if defined(ESPS_MODE_PIXEL)
@@ -242,18 +222,18 @@ void setup() {
   LOG_PORT.println("Initialized calling show");
   sceneShow();
   LOG_PORT.println("Called show, calling setStatic");
-  setStatic(255,255,255,200);
-  setStatic(0,0,0,200);
-  setStatic(255,0,0,200);
-  setStatic(0,255,0,200);
-  setStatic(0,0,255,200);
-  setStatic(255,255,0,200);
-  setStatic(0,255,255,200);
-  setStatic(255,0,255,200);
-  setStatic(0,0,0,200);
-  setStatic(64,64,64,200);
-  setStatic(128,128,128,200);
-  setStatic(192,192,192,200);
+  //setStatic(255,255,255,200);
+  //setStatic(0,0,0,200);
+  //setStatic(255,0,0,200);
+  //setStatic(0,255,0,200);
+  //setStatic(0,0,255,200);
+  //setStatic(255,255,0,200);
+  //setStatic(0,255,255,200);
+  //setStatic(255,0,255,200);
+  //setStatic(0,0,0,200);
+  //setStatic(64,64,64,200);
+  //setStatic(128,128,128,200);
+  //setStatic(192,192,192,200);
   
   LOG_PORT.println("Called setStatic");
 
@@ -271,10 +251,8 @@ void setup() {
   initStationWifi();
   initMQTT();
 
-
-
-
-
+    // Set default data source to E131
+    config.ds = DataSource::E131;
 
   if ( connectStationWifi() ) {
     wifiStationConnected = true;
@@ -292,7 +270,6 @@ void setup() {
   initWeb();
   initE131();
   updateConfig();
-  config.testmode = TestMode::RAINBOW;
 }
 
 void doReboot() {
@@ -311,14 +288,15 @@ void doReboot() {
 }
 
 void reportVersion() {
-  LOG_PORT.println("");
-  LOG_PORT.print(F("ESPixelStick v"));
-  for (uint8_t i = 0; i < strlen_P(VERSION); i++)
-    LOG_PORT.print((char)(pgm_read_byte(VERSION + i)));
-  LOG_PORT.print(F(" ("));
-  for (uint8_t i = 0; i < strlen_P(BUILD_DATE); i++)
-    LOG_PORT.print((char)(pgm_read_byte(BUILD_DATE + i)));
-  LOG_PORT.println(F(")"));
+    LOG_PORT.println("");
+    LOG_PORT.print(F("ESPixelStick v"));
+    for (uint8_t i = 0; i < strlen_P(VERSION); i++)
+        LOG_PORT.print((char)(pgm_read_byte(VERSION + i)));
+    LOG_PORT.print(F(" ("));
+    for (uint8_t i = 0; i < strlen_P(BUILD_DATE); i++)
+        LOG_PORT.print((char)(pgm_read_byte(BUILD_DATE + i)));
+    LOG_PORT.println(F(")"));
+    //LOG_PORT.println(ESP.getFullVersion());
 }
 
 void initE131() {
@@ -578,105 +556,98 @@ void connectToMqtt() {
 void onMqttConnect(bool sessionPresent) {
   LOG_PORT.println(F("- MQTT Connected"));
 
-  // Setup subscriptions
-  mqtt.subscribe(String(config.mqtt_topic + MQTT_LIGHT_COMMAND_TOPIC).c_str(), 0);
-  mqtt.subscribe(String(config.mqtt_topic + MQTT_LIGHT_BRIGHTNESS_COMMAND_TOPIC).c_str(), 0);
-  mqtt.subscribe(String(config.mqtt_topic + MQTT_LIGHT_RGB_COMMAND_TOPIC).c_str(), 0);
+    // Get retained MQTT state
+    mqtt.subscribe(config.mqtt_topic.c_str(), 0);
+    mqtt.unsubscribe(config.mqtt_topic.c_str());
 
-  // Publish state
-  publishRGBState();
-  publishRGBBrightness();
-  publishRGBColor();
+    // Setup subscriptions
+    mqtt.subscribe(String(config.mqtt_topic + MQTT_SET_COMMAND_TOPIC).c_str(), 0);
+
+    // Publish state
+    publishState();
 }
 
 void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
-  LOG_PORT.println(F("*** MQTT Disconnected ***"));
-  if (WiFi.isConnected()) {
-    mqttTicker.once(2, connectToMqtt);
-  }
-}
-
-void onMqttMessage(char* topic, char* p_payload,
-                   AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
-
-  String payload;
-  for (uint8_t i = 0; i < len; i++)
-    payload.concat((char)p_payload[i]);
-  /*
-    Serial.print("Topic: ");
-    Serial.print(topic);
-    Serial.print(" | Payload: ");
-    Serial.println(payload);
-  */
-  // Handle message topic
-  if (String(config.mqtt_topic + MQTT_LIGHT_COMMAND_TOPIC).equals(topic)) {
-    // Test if the payload is equal to "ON" or "OFF"
-    if (payload.equals(String(LIGHT_ON))) {
-      config.testmode = TestMode::MQTT;
-      if (m_rgb_state != true) {
-        m_rgb_state = true;
-        setStatic(m_rgb_red * m_rgb_brightness / 100,
-                  m_rgb_green * m_rgb_brightness / 100,
-                  m_rgb_blue * m_rgb_brightness / 100);
-        publishRGBState();
-      }
-    } else if (payload.equals(String(LIGHT_OFF))) {
-      config.testmode = TestMode::DISABLED;
-      if (m_rgb_state != false) {
-        m_rgb_state = false;
-        setStatic(0, 0, 0);
-        publishRGBState();
-      }
+    LOG_PORT.println(F("- MQTT Disconnected"));
+    if (WiFi.isConnected()) {
+        mqttTicker.once(2, connectToMqtt);
     }
-  } else if (String(config.mqtt_topic + MQTT_LIGHT_BRIGHTNESS_COMMAND_TOPIC).equals(topic)) {
-    uint8_t brightness = payload.toInt();
-    if (brightness > 100)
-      brightness = 100;
-    m_rgb_brightness = brightness;
-    setStatic(m_rgb_red * m_rgb_brightness / 100,
-              m_rgb_green * m_rgb_brightness / 100,
-              m_rgb_blue * m_rgb_brightness / 100);
-    publishRGBBrightness();
-  } else if (String(config.mqtt_topic + MQTT_LIGHT_RGB_COMMAND_TOPIC).equals(topic)) {
-    // Get the position of the first and second commas
-    uint8_t firstIndex = payload.indexOf(',');
-    uint8_t lastIndex = payload.lastIndexOf(',');
-
-    m_rgb_red = payload.substring(0, firstIndex).toInt();
-    m_rgb_green = payload.substring(firstIndex + 1, lastIndex).toInt();
-    m_rgb_blue = payload.substring(lastIndex + 1).toInt();
-    setStatic(m_rgb_red * m_rgb_brightness / 100,
-              m_rgb_green * m_rgb_brightness / 100,
-              m_rgb_blue * m_rgb_brightness / 100);
-    publishRGBColor();
-  }
 }
 
-// Called to publish the state of the led (on/off)
-void publishRGBState() {
-  if (m_rgb_state) {
-    mqtt.publish(String(config.mqtt_topic + MQTT_LIGHT_STATE_TOPIC).c_str(),
-                 0, true, LIGHT_ON);
-  } else {
-    mqtt.publish(String(config.mqtt_topic + MQTT_LIGHT_STATE_TOPIC).c_str(),
-                 0, true, LIGHT_OFF);
-  }
+void onMqttMessage(char* topic, char* payload,
+        AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
+    StaticJsonBuffer<JSON_BUFFER_SIZE> jsonBuffer;
+    JsonObject& root = jsonBuffer.parseObject(payload);
+    bool stateOn = false;
+
+    if (!root.success()) {
+        LOG_PORT.println("MQTT: Parsing failed");
+        return;
+    }
+
+    if (root.containsKey("state")) {
+        if (strcmp(root["state"], LIGHT_ON) == 0) {
+            stateOn = true;
+        } else if (strcmp(root["state"], LIGHT_OFF) == 0) {
+            stateOn = false;
+        }
+    }
+
+    if (root.containsKey("brightness")) {
+        effects.setBrightness(root["brightness"]);
+    }
+
+    if (root.containsKey("color")) {
+        effects.setColor({
+            root["color"]["r"],
+            root["color"]["g"],
+            root["color"]["b"]
+        });
+    }
+
+    if (root.containsKey("effect")) {
+        // Set the explict effect provided by the MQTT client
+        effects.setEffect(root["effect"]);
+    }
+
+    if (root.containsKey("reverse")) {
+        effects.setReverse(root["reverse"]);
+    }
+
+    if (root.containsKey("mirror")) {
+        effects.setMirror(root["mirror"]);
+    }
+
+    // Set data source based on state - Fall back to E131 when off
+    if (stateOn) {
+        config.ds = DataSource::MQTT;
+    } else {
+        config.ds = DataSource::E131;
+        effects.clearAll();
+    }
+
+    publishState();
 }
 
-// Called to publish the brightness of the led (0-100)
-void publishRGBBrightness() {
-  snprintf(m_msg_buffer, MSG_BUFFER_SIZE, "%d", m_rgb_brightness);
-  mqtt.publish(String(config.mqtt_topic + MQTT_LIGHT_BRIGHTNESS_STATE_TOPIC).c_str(),
-               0, true, m_msg_buffer);
-}
+void publishState() {
+    StaticJsonBuffer<JSON_BUFFER_SIZE> jsonBuffer;
+    JsonObject& root = jsonBuffer.createObject();
+    root["state"] = (config.ds == DataSource::MQTT) ? LIGHT_ON : LIGHT_OFF;
+    JsonObject& color = root.createNestedObject("color");
+    color["r"] = effects.getColor().r;
+    color["g"] = effects.getColor().g;
+    color["b"] = effects.getColor().b;
+    root["brightness"] = effects.getBrightness();
+    if (effects.getEffect() != nullptr) {
+        root["effect"] = effects.getEffect();
+    }
+    root["reverse"] = effects.getReverse();
+    root["mirror"] = effects.getMirror();
 
-// Called to publish the colors of the led (xx(x),xx(x),xx(x))
-void publishRGBColor() {
-  snprintf(m_msg_buffer, MSG_BUFFER_SIZE, "%d,%d,%d", m_rgb_red, m_rgb_green, m_rgb_blue);
-  mqtt.publish(String(config.mqtt_topic + MQTT_LIGHT_RGB_STATE_TOPIC).c_str(),
-               0, true, m_msg_buffer);
+    char buffer[root.measureLength() + 1];
+    root.printTo(buffer, sizeof(buffer));
+    mqtt.publish(config.mqtt_topic.c_str(), 0, true, buffer);
 }
-
 
 /////////////////////////////////////////////////////////
 //
@@ -775,10 +746,6 @@ void validateConfig() {
     config.mqtt_topic = "diy/esps/" + String(chipId);
   }
 
-#if defined(ESPS_SUPPORT_PWM)
-  config.devmode.MPWM = true;
-#endif
-
 #if defined(ESPS_MODE_PIXEL)
   // Set Mode
   //    config.devmode = DevMode::MPIXEL;
@@ -831,7 +798,7 @@ void validateConfig() {
   else if (config.baudrate < BaudRate::BR_38400)
     config.baudrate = BaudRate::BR_57600;
 #endif
-  config.testmode = TestMode::DISABLED;
+  
 }
 void initPixels();
 void updateConfig() {
@@ -867,6 +834,7 @@ void initPixels() {
   LOG_PORT.printf("Set Gamma: %0.2f, GammaVal: %0.2f, Brightness: %0.2f\n",config.gamma,config.gammaVal,config.briteVal);
   pixels.setGamma(config.gamma);
   updateGammaTable(config.gammaVal, config.briteVal);
+  effects.begin(&pixels, config.channel_count / 3);
 }
 #elif defined(ESPS_MODE_SERIAL)
 void initPixels() {
@@ -924,39 +892,18 @@ void dsDeviceConfig(JsonObject &json) {
   config.mqtt_topic = json["mqtt"]["topic"].as<String>();
 
 #if defined(ESPS_MODE_PIXEL)
-  /* Pixel */
+  // Pixel
   config.pixel_type = PixelType(static_cast<uint8_t>(json["pixel"]["type"]));
   config.pixel_color = PixelColor(static_cast<uint8_t>(json["pixel"]["color"]));
   config.gamma = json["pixel"]["gamma"];
   config.gammaVal = json["pixel"]["gammaVal"];
   config.briteVal = json["pixel"]["briteVal"];
-
 #elif defined(ESPS_MODE_SERIAL)
-  /* Serial */
+  // Serial
   config.serial_type = SerialType(static_cast<uint8_t>(json["serial"]["type"]));
   config.baudrate = BaudRate(static_cast<uint32_t>(json["serial"]["baudrate"]));
 #endif
 
-#if defined(ESPS_SUPPORT_PWM)
-  /* PWM */
-  config.pwm_global_enabled = json["pwm"]["enabled"];
-  config.pwm_freq = json["pwm"]["freq"];
-  config.pwm_gamma = json["pwm"]["gamma"];
-  config.pwm_gpio_invert = 0;
-  config.pwm_gpio_digital = 0;
-  config.pwm_gpio_enabled = 0;
-  for (int gpio = 0; gpio < NUM_GPIO; gpio++) {
-    if (valid_gpio_mask & 1 << gpio) {
-      config.pwm_gpio_dmx[gpio] = json["pwm"]["gpio" + (String)gpio + "_channel"];
-      if (json["pwm"]["gpio" + (String)gpio + "_invert"])
-        config.pwm_gpio_invert |= 1 << gpio;
-      if (json["pwm"]["gpio" + (String)gpio + "_digital"])
-        config.pwm_gpio_digital |= 1 << gpio;
-      if (json["pwm"]["gpio" + (String)gpio + "_enabled"])
-        config.pwm_gpio_enabled |= 1 << gpio;
-    }
-  }
-#endif
 }
 
 // Load configugration JSON file
@@ -1060,23 +1007,6 @@ void serializeConfig(String &jsonString, bool pretty, bool creds) {
   serial["baudrate"] = static_cast<uint32_t>(config.baudrate);
 #endif
 
-#if defined(ESPS_SUPPORT_PWM)
-  // PWM
-  JsonObject &pwm = json.createNestedObject("pwm");
-  pwm["enabled"] = config.pwm_global_enabled;
-  pwm["freq"] = config.pwm_freq;
-  pwm["gamma"] = config.pwm_gamma;
-
-  for (int gpio = 0; gpio < NUM_GPIO; gpio++ ) {
-    if (valid_gpio_mask & 1 << gpio) {
-      pwm["gpio" + (String)gpio + "_channel"] = static_cast<uint16_t>(config.pwm_gpio_dmx[gpio]);
-      pwm["gpio" + (String)gpio + "_enabled"] = static_cast<bool>(config.pwm_gpio_enabled & 1 << gpio);
-      pwm["gpio" + (String)gpio + "_invert"] = static_cast<bool>(config.pwm_gpio_invert & 1 << gpio);
-      pwm["gpio" + (String)gpio + "_digital"] = static_cast<bool>(config.pwm_gpio_digital & 1 << gpio);
-    }
-  }
-#endif
-
   if (pretty)
     json.prettyPrintTo(jsonString);
   else
@@ -1103,7 +1033,6 @@ void saveConfig() {
   }
 }
 
-
 /////////////////////////////////////////////////////////
 //
 //  Set routines for Testing and MQTT
@@ -1112,20 +1041,24 @@ void saveConfig() {
 
 void setStatic(uint8_t r, uint8_t g, uint8_t b,uint8_t waitTime) {
   LOG_PORT.printf("setStatic(%d,%d,%d,%d)\n",r,g,b,waitTime);
+  
   setStatic(r,g,b);
-  sceneShow();
+  effects.run();
+  //sceneShow();
   delay(waitTime);
 }
 
 void setStatic(uint8_t r, uint8_t g, uint8_t b) {
+  effects.setColor({r,g,b});
+  effects.setEffect("Solid");
   LOG_PORT.printf("setStatic(%d,%d,%d)\n",r,g,b);
-  uint16_t i = 0;
+  /*uint16_t i = 0;
   while (i <= config.channel_count - 3) {
     pixels.setValue(i,r);
     setPixelValue(i++, r);
     setPixelValue(i++, g);
     setPixelValue(i++, b);
-  }
+  }*/
 }
 /////////////////////////////////////////////////////////
 //
@@ -1133,12 +1066,13 @@ void setStatic(uint8_t r, uint8_t g, uint8_t b) {
 //
 /////////////////////////////////////////////////////////
 void loop() {
+  e131_packet_t packet;
   if (asAP && millis() - asAPLastColor > 500 ) {
     asAPLastColor = millis();
     if ( asAPColorOn ) {
-      setStatic(255, 255, 0);
+      //setStatic(255, 255, 0);
     } else {
-      setStatic(0, 0, 0);
+      //setStatic(0, 0, 0);
     }
     asAPColorOn = ! asAPColorOn;
   }
@@ -1146,159 +1080,73 @@ void loop() {
   // Reboot handler
   if (reboot) doReboot();
 
-  if (config.testmode == TestMode::DISABLED || config.testmode == TestMode::VIEW_STREAM) {
-    handleE131();
-    if ( ! firstMessage )
-      handleDefaultPattern();
-  } else {  // Other testmodes
-    handleTestMode();
-  }
-  /* Streaming refresh */
-  refresh();
-  /* Update the PWM outputs */
-#if defined(ESPS_SUPPORT_PWM)
-  handlePWM();
-#endif
-}
+    // Render output for current data source
+    switch (config.ds) {
+        case DataSource::E131:
+            // Parse a packet and update pixels
+            if (!e131.isEmpty()) {
+                e131.pull(&packet);
+                uint16_t universe = htons(packet.universe);
+                uint8_t *data = packet.property_values + 1;
+                //LOG_PORT.print(universe);
+                //LOG_PORT.println(packet.sequence_number);
+                if ((universe >= config.universe) && (universe <= uniLast)) {
+                    // Universe offset and sequence tracking
+                    uint8_t uniOffset = (universe - config.universe);
+                    if (packet.sequence_number != seqTracker[uniOffset]++) {
+                        LOG_PORT.print(F("Sequence Error - expected: "));
+                        LOG_PORT.print(seqTracker[uniOffset] - 1);
+                        LOG_PORT.print(F(" actual: "));
+                        LOG_PORT.print(packet.sequence_number);
+                        LOG_PORT.print(F(" universe: "));
+                        LOG_PORT.println(universe);
+                        seqError[uniOffset]++;
+                        seqTracker[uniOffset] = packet.sequence_number + 1;
+                    }
 
-void handleDefaultPattern() {
-}
-void handleTestMode() {
-  switch (config.testmode) {
-    case TestMode::STATIC: {
-        //LOG_PORT.print("S");
-        setStatic(testing.r, testing.g, testing.b);
-        break;
-      }
-    case TestMode::CHASE: {
-        testModeChase();
-        break;
-      }
-    case TestMode::RAINBOW: {
-        testModeRainbow();
-        break;
-      }
-  }
-}
+                    // Offset the channels if required
+                    uint16_t offset = 0;
+                    offset = config.channel_start - 1;
 
-void handleE131() {
-  e131_packet_t packet;
-  if (e131.isEmpty()) return;
-  if ( ! firstMessage ) firstMessage = true;
-  lastE131Request = millis();
-  //LOG_PORT.print("E");
+                    // Find start of data based off the Universe
+                    int16_t dataStart = uniOffset * config.universe_limit - offset;
 
-  // Parse a packet and update pixels
-  e131.pull(&packet);
-  uint16_t universe = htons(packet.universe);
-  uint8_t *data = packet.property_values + 1;
-  if ( universe < config.universe || universe > uniLast ) return;
-  // Universe offset and sequence tracking
-  uint8_t uniOffset = (universe - config.universe);
-  if (packet.sequence_number != seqTracker[uniOffset]++) {
-    seqError[uniOffset]++;
-    seqTracker[uniOffset] = packet.sequence_number + 1;
-  }
+                    // Calculate how much data we need for this buffer
+                    uint16_t dataStop = config.channel_count;
+                    uint16_t channels = htons(packet.property_value_count) - 1;
+                    if (config.universe_limit < channels)
+                        channels = config.universe_limit;
+                    if ((dataStart + channels) < dataStop)
+                        dataStop = dataStart + channels;
 
-  // Offset the channels if required
-  uint16_t offset = 0;
-  offset = config.channel_start - 1;
+                    // Set the data
+                    uint16_t buffloc = 0;
 
-  // Find start of data based off the Universe
-  int16_t dataStart = uniOffset * config.universe_limit - offset;
+                    // ignore data from start of first Universe before channel_start
+                    if (dataStart < 0) {
+                        dataStart = 0;
+                        buffloc = config.channel_start - 1;
+                    }
 
-  // Calculate how much data we need for this buffer
-  uint16_t dataStop = config.channel_count;
-  uint16_t channels = htons(packet.property_value_count) - 1;
-  if (config.universe_limit < channels)
-    channels = config.universe_limit;
-  if ((dataStart + channels) < dataStop)
-    dataStop = dataStart + channels;
+                    for (int i = dataStart; i < dataStop; i++) {
+    #if defined(ESPS_MODE_PIXEL)
+                        pixels.setValue(i, data[buffloc]);
+    #elif defined(ESPS_MODE_SERIAL)
+                        serial.setValue(i, data[buffloc]);
+    #endif
+                        buffloc++;
+                    }
+                }
+            }
+            break;
 
-  // Set the data
-  uint16_t buffloc = 0;
+        case DataSource::MQTT:
+            effects.run();
+            break;
 
-  // ignore data from start of first Universe before channel_start
-  if (dataStart < 0) {
-    dataStart = 0;
-    buffloc = config.channel_start - 1;
-  }
-
-  for (int i = dataStart; i < dataStop; i++) {
-    setPixelValue(i, data[buffloc++]);
-  }
-}
-
-
-void doChase();
-
-void testModeChase() {
-  //LOG_PORT.print("C");
-  // Run chase routine
-  if (millis() - testing.last > 100) {
-    // Rime for new step
-    testing.last = millis();
-    doChase();
-  }
-}
-
-#if defined(ESPS_MODE_PIXEL)
-void doChase() {
-  // Clear whole string
-  for (int y = 0; y < config.channel_count; y++)
-    pixels.setValue(y, 0);
-  // Set pixel at step
-  int ch_offset = testing.step * 3;
-  pixels.setValue(ch_offset++, testing.r);
-  pixels.setValue(ch_offset++, testing.g);
-  pixels.setValue(ch_offset, testing.b);
-  testing.step++;
-  if (testing.step >= (config.channel_count / 3))
-    testing.step = 0;
-
-}
-#elif defined(ESPS_MODE_SERIAL)
-void doChase() {
-  for (int y = 0; y < config.channel_count; y++)
-    serial.setValue(y, 0);
-  // Set pixel at step
-  serial.setValue(testing.step++, 0xFF);
-  if (testing.step >= config.channel_count)
-    testing.step = 0;
-}
-#endif
-
-void doRainbow();
-void testModeRainbow () {
-  //LOG_PORT.print("R");
-  // Run rainbow routine
-  if (millis() - testing.last < 50) return;
-  testing.last = millis();
-  uint16_t i, WheelPos, num_pixels;
-  num_pixels = config.channel_count / 3;
-  if (testing.step > 255) {
-    testing.step = 0;
-  }
-  for (i = 0; i < (num_pixels); i++) {
-    int ch_offset = i * 3;
-    WheelPos = 255 - (((i * 255 / num_pixels) + testing.step) & 255);
-    if (WheelPos < 85) {
-      setPixelValue(ch_offset++, 255 - WheelPos * 3);
-      setPixelValue(ch_offset++, 0);
-      setPixelValue(ch_offset, WheelPos * 3);
-    } else if (WheelPos < 170) {
-      WheelPos -= 85;
-      setPixelValue(ch_offset++, 0);
-      setPixelValue(ch_offset++, WheelPos * 3);
-      setPixelValue(ch_offset, 255 - WheelPos * 3);
-    } else {
-      WheelPos -= 170;
-      setPixelValue(ch_offset++, WheelPos * 3);
-      setPixelValue(ch_offset++, 255 - WheelPos * 3);
-      setPixelValue(ch_offset, 0);
+        case DataSource::WEB:
+            effects.run();
+            break;
     }
-  }
-  testing.step++;
 }
-
-
+// vim:sw=2:ts=2:et
