@@ -36,6 +36,8 @@ extern uint16_t     uniLast;    // Last Universe to listen for
 extern bool         reboot;     // Reboot flag
 
 
+
+
 /* 
   Packet Commands
     E1 - Get Elements
@@ -63,6 +65,8 @@ extern bool         reboot;     // Reboot flag
 EFUpdate efupdate;
 
 void procX(uint8_t *data, AsyncWebSocketClient *client) {
+  //LOG_PORT.print(F("ProcX WS: "));
+  //LOG_PORT.println(data[1]);
     switch (data[1]) {
         case 'S':
             client->text("XS" + 
@@ -94,9 +98,13 @@ void procX(uint8_t *data, AsyncWebSocketClient *client) {
         case '6':  // Init 6 baby, reboot!
             reboot = true;
     }
+    //LOG_PORT.println(F("ProcX Done"));
 }
 
 void procE(uint8_t *data, AsyncWebSocketClient *client) {
+    //LOG_PORT.print(F("ProcE WS: "));
+    //LOG_PORT.println(data[1]);
+
     switch (data[1]) {
         case '1':
             // Create buffer and root object
@@ -139,9 +147,13 @@ void procE(uint8_t *data, AsyncWebSocketClient *client) {
             client->text("E1" + response);
             break;
     }
+    //LOG_PORT.println(F("ProcE Done"));
 }
 
 void procG(uint8_t *data, AsyncWebSocketClient *client) {
+    //LOG_PORT.print(F("ProcG WS: "));
+    //LOG_PORT.println(data[1]);
+
     switch (data[1]) {
         case '1': {
             String response;
@@ -176,14 +188,18 @@ void procG(uint8_t *data, AsyncWebSocketClient *client) {
             client->text("G2" + response);
             break;
     }
+    //LOG_PORT.println(F("ProcG Done"));
 }
 
 void procS(uint8_t *data, AsyncWebSocketClient *client) {
+    //LOG_PORT.print(F("ProcS WS: "));
+    //LOG_PORT.println(data[1]);
+
     DynamicJsonBuffer jsonBuffer;
     JsonObject &json = jsonBuffer.parseObject(reinterpret_cast<char*>(data + 2));
     if (!json.success()) {
-        LOG_PORT.println(F("*** procS(): Parse Error ***"));
-        LOG_PORT.println(reinterpret_cast<char*>(data));
+        //LOG_PORT.println(F("*** procS(): Parse Error ***"));
+        //LOG_PORT.println(reinterpret_cast<char*>(data));
         return;
     }
 
@@ -208,9 +224,13 @@ void procS(uint8_t *data, AsyncWebSocketClient *client) {
                 client->text("S2");
             break;
     }
+    //LOG_PORT.println(F("ProcS Done"));
 }
 
 void procT(uint8_t *data, AsyncWebSocketClient *client) {
+    //LOG_PORT.print(F("ProcT WS: "));
+    //LOG_PORT.println(data[1]);
+
     switch (data[1]) {
         case '0':
             config.testmode = TestMode::DISABLED;
@@ -264,10 +284,13 @@ void procT(uint8_t *data, AsyncWebSocketClient *client) {
             break;
         }
     }
+    //LOG_PORT.println(F("ProcT Done"));
 }
 
 void handle_fw_upload(AsyncWebServerRequest *request, String filename,
         size_t index, uint8_t *data, size_t len, bool final) {
+    //LOG_PORT.print(F("HandleFWUpload"));
+
     if (!index) {
         WiFiUDP::stopAll();
         LOG_PORT.print(F("* Upload Started: "));
@@ -291,14 +314,23 @@ void handle_fw_upload(AsyncWebServerRequest *request, String filename,
         saveConfig();
         reboot = true;
     }
+    //LOG_PORT.println(F("HandleFWUpload Done"));
 }
 
 void wsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         AwsEventType type, void * arg, uint8_t *data, size_t len) {
+    //LOG_PORT.print(F("WSEvent: "));
+    
     switch (type) {
         case WS_EVT_DATA: {
+            //LOG_PORT.print(F("WSEventData: "));
+            //LOG_PORT.print(data[0]);
             AwsFrameInfo *info = static_cast<AwsFrameInfo*>(arg);
+            //LOG_PORT.print(info->final?F(" Final "):F(" Incomplete "));
             if (info->opcode == WS_TEXT) {
+                //LOG_PORT.print(F(" WSText: "));
+                //LOG_PORT.println(data[0]);
+
                 switch (data[0]) {
                     case 'X':
                         procX(data, client);
@@ -324,6 +356,7 @@ void wsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         case WS_EVT_CONNECT:
             LOG_PORT.print(F("* WS Connect - "));
             LOG_PORT.println(client->id());
+            client->ping();
             break;
         case WS_EVT_DISCONNECT:
             LOG_PORT.print(F("* WS Disconnect - "));
@@ -336,7 +369,7 @@ void wsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
             LOG_PORT.println(F("** WS ERROR **"));
             break;
     }
+    //LOG_PORT.println(F("WSEvent Done"));
 }
 
 #endif /* ESPIXELSTICK_H_ */
-

@@ -94,7 +94,7 @@ class PixelDriver {
     void setPin(uint8_t pin);
     void setGamma(bool gamma);
     void updateOrder(PixelColor color);
-    void ICACHE_RAM_ATTR show();
+    bool ICACHE_RAM_ATTR show();
     uint8_t* getData();
 
     /* Set channel value at address */

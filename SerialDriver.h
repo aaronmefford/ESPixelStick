@@ -64,7 +64,7 @@ class SerialDriver {
     int begin(HardwareSerial *theSerial, SerialType type, uint16_t length,
             BaudRate baud);
     void startPacket();
-    void show();
+    bool show();
     uint8_t* getData();
 
     /* Set the value */

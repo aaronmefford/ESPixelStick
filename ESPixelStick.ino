@@ -24,8 +24,13 @@
 /* Output Mode has been moved to ESPixelStick.h */
 
 /* Fallback configuration if config.json is empty or fails */
-const char ssid[] = "YOUR_SSID";
-const char passphrase[] = "YOUR_PASSPHRASE";
+// Don't change the default, change ssid[]
+const char default_ssid[]       = "ESPPixelNet";
+const char default_passphrase[] = "--ESP4YourLife!--";
+const char ssid[] = "mefford";
+//const char* ssid = default_ssid;
+const char passphrase[] = "iwillobeytherules";
+//const char passphrase[] = "";
 
 /*****************************************/
 /*         END - Configuration           */
@@ -40,6 +45,7 @@ const char passphrase[] = "YOUR_PASSPHRASE";
 #include <ESPAsyncWebServer.h>
 #include <ESPAsyncE131.h>
 #include <ArduinoJson.h>
+#include <DNSServer.h>
 #include <Hash.h>
 #include <SPI.h>
 #include "ESPixelStick.h"
@@ -99,6 +105,11 @@ char m_msg_buffer[MSG_BUFFER_SIZE];
 // Configuration file
 const char CONFIG_FILE[] = "/config.json";
 
+// DNS Server Default Port
+const byte DNS_PORT = 53;
+IPAddress ap_ip(172, 31, 255, 254);
+IPAddress ap_subnet(255, 255, 255, 0);
+
 ESPAsyncE131        e131(10);       // ESPAsyncE131 with X buffers
 testing_t           testing;        // Testing mode
 config_t            config;         // Current configuration
@@ -107,13 +118,22 @@ uint16_t            uniLast = 1;    // Last Universe to listen for
 bool                reboot = false; // Reboot flag
 AsyncWebServer      web(HTTP_PORT); // Web Server
 AsyncWebSocket      ws("/ws");      // Web Socket Plugin
+DNSServer           dnsServer;      // DNS Server for Captive Portal
 uint8_t             *seqTracker;    // Current sequence numbers for each Universe */
 uint32_t            lastUpdate;     // Update timeout tracker
+uint32_t            lastWebRequest; // WebRequest timeout tracker
+uint32_t            lastE131Request;// E131 timeout tracker
+
 WiFiEventHandler    wifiConnectHandler;     // WiFi connect handler
 WiFiEventHandler    wifiDisconnectHandler;  // WiFi disconnect handler
 Ticker              wifiTicker; // Ticker to handle WiFi
 AsyncMqttClient     mqtt;       // MQTT object
 Ticker              mqttTicker; // Ticker to handle MQTT
+bool                wifiStationConnected;
+bool                asAP;
+bool                firstMessage;
+bool                asAPColorOn;
+uint32_t            asAPLastColor;     // Update asAP color timeout tracker
 
 // Output Drivers
 #if defined(ESPS_MODE_PIXEL)
@@ -131,9 +151,38 @@ SerialDriver    serial;         // Serial object
 /////////////////////////////////////////////////////////
 
 void loadConfig();
-void initWifi();
+void initStationWifi();
 void initWeb();
 void updateConfig();
+bool connectConfigWifi();
+bool connectDefaultWifi();
+bool connectStationWifi();
+void reconnectStationWifi();
+
+
+/////////////////////////////////////////////////////////
+//
+//  Macros
+//
+/////////////////////////////////////////////////////////
+
+
+#define setPixelValue(x,i,val) (x.setValue(i, val);)
+#if defined(ESPS_MODE_PIXEL)
+#define sceneShow() (pixels.show())
+#define setPixelValue(i,val) (pixels.setValue(i, val))
+#define refresh() ( pixels.canRefresh() && pixels.show() )
+#elif defined(ESPS_MODE_SERIAL)
+#define sceneShow() (serial.show())
+#define setPixelValue(i,val) (serial.setValue(i, val))
+#define refresh() ( serial.canRefresh() && serial.show())
+#endif
+
+/////////////////////////////////////////////////////////
+//
+//  Initialize and Setup
+//
+/////////////////////////////////////////////////////////
 
 // Radio config
 RF_PRE_INIT() {
@@ -141,22 +190,72 @@ RF_PRE_INIT() {
   system_phy_set_powerup_option(31);  // Do full RF calibration on power-up
   system_phy_set_max_tpw(82);         // Set max TX power
 }
-
-void setup() {
-  // Configure SDK params
-  wifi_set_sleep_type(NONE_SLEEP_T);
-
+void setInitialPinStates() {
   // Initial pin states
   pinMode(DATA_PIN, OUTPUT);
   digitalWrite(DATA_PIN, LOW);
+  // Configure the outputs
 
+#if defined (ESPS_SUPPORT_PWM)
+  setupPWM();
+#endif
+
+#if defined (ESPS_MODE_PIXEL)
+  pixels.setPin(DATA_PIN);
+  pixels.begin();
+#elif defined(ESPS_MODE_SERIAL)
+  //serial.begin(&SEROUT_PORT, config.serial_type, config.channel_count, config.baudrate);
+#endif
+
+}
+
+void reportMacAddress() {
+  LOG_PORT.print(F("\n####################################################\n#  MAC Address: "));
+  LOG_PORT.print(WiFi.macAddress());
+  LOG_PORT.print(F("\n####################################################"));
+}
+
+void initSerialLogPort() {
   // Setup serial log port
   LOG_PORT.begin(115200);
   delay(10);
+}
 
-  LOG_PORT.print("\n####################################################\n#  MAC Address: ");
-  LOG_PORT.println(WiFi.macAddress());
-  LOG_PORT.print("\n####################################################");
+
+
+void setup() {
+  asAP = false;
+  asAPColorOn = false;
+  firstMessage = false;
+  wifiStationConnected = false;
+
+  initSerialLogPort();
+  reportMacAddress();
+
+  setInitialPinStates();
+  loadConfig();
+  updateConfig();
+
+  pixels.setGamma(0);
+  updateGammaTable(2.2, 1.0);
+
+  LOG_PORT.println("Initialized calling show");
+  sceneShow();
+  LOG_PORT.println("Called show, calling setStatic");
+  setStatic(255,255,255,200);
+  setStatic(0,0,0,200);
+  setStatic(255,0,0,200);
+  setStatic(0,255,0,200);
+  setStatic(0,0,255,200);
+  setStatic(255,255,0,200);
+  setStatic(0,255,255,200);
+  setStatic(255,0,255,200);
+  setStatic(0,0,0,200);
+  setStatic(64,64,64,200);
+  setStatic(128,128,128,200);
+  setStatic(192,192,192,200);
+  
+  LOG_PORT.println("Called setStatic");
 
 #if defined(DEBUG)
   ets_install_putc1((void *) &_u0_putc);
@@ -166,6 +265,52 @@ void setup() {
   // Enable SPIFFS
   SPIFFS.begin();
 
+  // Load configuration from SPIFFS and set Hostname
+  //loadConfig();
+  reportVersion();
+  initStationWifi();
+  initMQTT();
+
+
+
+
+
+
+  if ( connectStationWifi() ) {
+    wifiStationConnected = true;
+  } else {
+    //LOG_PORT.println(F("**** FAILED TO ASSOCIATE WITH AP ****"));
+    // If we fail, go SoftAP or reboot
+    WiFi.mode(WIFI_AP_STA);
+
+    startSoftAP();
+
+    //doReboot();
+  }
+
+  // Configure and start the web server
+  initWeb();
+  initE131();
+  updateConfig();
+  config.testmode = TestMode::RAINBOW;
+}
+
+void doReboot() {
+
+  LOG_PORT.println(F("**** REBOOTING ****"));
+  //setStatic(255,0,0);
+  delay(REBOOT_DELAY / 4);
+  //setStatic(0,0,0);
+  delay(REBOOT_DELAY / 4);
+  //setStatic(255,0,0);
+  delay(REBOOT_DELAY / 4);
+  //setStatic(0,0,0);
+  delay(REBOOT_DELAY / 4);
+  //setStatic(255,0,0);
+  ESP.restart();
+}
+
+void reportVersion() {
   LOG_PORT.println("");
   LOG_PORT.print(F("ESPixelStick v"));
   for (uint8_t i = 0; i < strlen_P(VERSION); i++)
@@ -173,54 +318,24 @@ void setup() {
   LOG_PORT.print(F(" ("));
   for (uint8_t i = 0; i < strlen_P(BUILD_DATE); i++)
     LOG_PORT.print((char)(pgm_read_byte(BUILD_DATE + i)));
-  LOG_PORT.println(")");
+  LOG_PORT.println(F(")"));
+}
 
-  // Load configuration from SPIFFS and set Hostname
-  loadConfig();
-  WiFi.hostname(config.hostname);
-  config.testmode = TestMode::DISABLED;
-
-  // Setup WiFi Handlers
-  wifiConnectHandler = WiFi.onStationModeGotIP(onWifiConnect);
-
-  // Setup MQTT Handlers
-  if (config.mqtt) {
-    mqtt.onConnect(onMqttConnect);
-    mqtt.onDisconnect(onMqttDisconnect);
-    mqtt.onMessage(onMqttMessage);
-    mqtt.setServer(config.mqtt_ip.c_str(), config.mqtt_port);
-    if (config.mqtt_user.length() > 0)
-      mqtt.setCredentials(config.mqtt_user.c_str(), config.mqtt_password.c_str());
-  }
-
-  // Fallback to default SSID and passphrase if we fail to connect
-  initWifi();
-  if (WiFi.status() != WL_CONNECTED) {
-    LOG_PORT.println(F("*** Timeout - Reverting to default SSID ***"));
-    config.ssid = ssid;
-    config.passphrase = passphrase;
-    initWifi();
-  }
-
-  // If we fail again, go SoftAP or reboot
-  if (WiFi.status() != WL_CONNECTED) {
-    if (config.ap_fallback) {
-      LOG_PORT.println(F("**** FAILED TO ASSOCIATE WITH AP, GOING SOFTAP ****"));
-      WiFi.mode(WIFI_AP);
-      String ssid = "ESPixelStick " + String(config.hostname);
-      WiFi.softAP(ssid.c_str());
-    } else {
-      LOG_PORT.println(F("**** FAILED TO ASSOCIATE WITH AP, REBOOTING ****"));
-      ESP.restart();
-    }
-  }
-
-  wifiDisconnectHandler = WiFi.onStationModeDisconnected(onWiFiDisconnect);
-
-  // Configure and start the web server
-  initWeb();
-
+void initE131() {
   // Setup E1.31
+    // Setup the sequence error tracker
+  uint8_t uniTotal = (uniLast + 1) - config.universe;
+
+  if (seqTracker) free(seqTracker);
+  if ((seqTracker = static_cast<uint8_t *>(malloc(uniTotal))))
+    memset(seqTracker, 0x00, uniTotal);
+
+  if (seqError) free(seqError);
+  if ((seqError = static_cast<uint32_t *>(malloc(uniTotal * 4))))
+    memset(seqError, 0x00, uniTotal * 4);
+
+  // Zero out packet stats
+  e131.stats.num_packets = 0;
   if (config.multicast) {
     if (e131.begin(E131_MULTICAST, config.universe,
                    uniLast - config.universe + 1)) {
@@ -236,19 +351,6 @@ void setup() {
       LOG_PORT.println(F("*** UNICAST INIT FAILED ****"));
     }
   }
-
-  // Configure the outputs
-#if defined (ESPS_SUPPORT_PWM)
-  setupPWM();
-#endif
-
-#if defined (ESPS_MODE_PIXEL)
-  pixels.setPin(DATA_PIN);
-  updateConfig();
-  pixels.show();
-#else
-  updateConfig();
-#endif
 }
 
 /////////////////////////////////////////////////////////
@@ -257,34 +359,98 @@ void setup() {
 //
 /////////////////////////////////////////////////////////
 
-void initWifi() {
+void initStationWifi() {
+  // Configure SDK params
+  wifi_set_sleep_type(NONE_SLEEP_T);
+  //Don't wear out the flash writing unused wifi settings
+  WiFi.persistent(false);
+
+  if ( config.hostname.length() )
+    WiFi.hostname(config.hostname);
+
   // Switch to station mode and disconnect just in case
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
 
-  connectWifi();
-  uint32_t timeout = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    LOG_PORT.print(".");
-    delay(500);
-    if (millis() - timeout > CONNECT_TIMEOUT) {
-      LOG_PORT.println("");
-      LOG_PORT.println(F("*** Failed to connect ***"));
-      break;
-    }
-  }
+  // Setup WiFi Handlers
+  wifiConnectHandler = WiFi.onStationModeGotIP(onWifiConnect);
+
 }
 
-void connectWifi() {
-  delay(secureRandom(100, 500));
+bool connectStationWifi() {
+  //setStatic(0,0,0);
+  delay(secureRandom(50, 250));
+
+  //setStatic(128,255,0);
+  if ( connectConfigWifi() ) {
+    LOG_PORT.println(F("Successfully connected to the configured WiFi"));
+  }  else   {
+    //setStatic(255,128,0);
+    // Fallback to default SSID and passphrase if we fail to connect
+    // If the SSID is the same as the configured SSID then there is no point to retry
+    // If the hardcoded SSID has not been set to something different than the default SSID there is no point
+    if (config.ssid.length() && ! config.ssid.equals(ssid) )
+      LOG_PORT.println(F("*** Timeout - Reverting to default SSID ***"));
+    if ( ! connectDefaultWifi() )
+      return false;
+  }
+  if ( ! getStationIP() ) {
+    return false;
+  }
+  wifiDisconnectHandler = WiFi.onStationModeDisconnected(onWiFiDisconnect);
+
+  // Setup IGMP subscriptions if multicast is enabled
+  if (config.multicast)
+    multiSub();
+  return true;
+
+}
+void reconnectStationWifi() {
+  connectStationWifi();
+}
+
+bool connectConfigWifi() {
+
+  // Config is empty or default
+  if ( !config.ssid.length() || config.ssid.equals(default_ssid) ) {
+    LOG_PORT.print(F("** Skipping first connect, we are using the default SSID: "));
+
+    //If we have a default config we will need the AP to set the config
+    config.ap_fallback = true;
+    return false;
+  }
+  return connectAttemptWifi(config.ssid.c_str(), config.hostname.c_str(), config.passphrase.c_str());
+}
+
+bool connectDefaultWifi() {
+  return connectAttemptWifi(ssid, config.hostname.c_str(), passphrase);
+}
+
+bool connectAttemptWifi(const char * ssid, const char * hostname, const char * passphrase) {
+  WiFi.disconnect();
 
   LOG_PORT.println("");
   LOG_PORT.print(F("Connecting to "));
-  LOG_PORT.print(config.ssid);
+  LOG_PORT.print(ssid);
   LOG_PORT.print(F(" as "));
-  LOG_PORT.println(config.hostname);
+  LOG_PORT.println(hostname);
 
-  WiFi.begin(config.ssid.c_str(), config.passphrase.c_str());
+  WiFiMode_t wMode = WiFi.getMode();
+  if ( wMode != WIFI_STA && wMode != WIFI_AP_STA ) {
+    LOG_PORT.println(F("Cannot connectWiFi, WiFi mode is incorrect"));
+    return false;
+  }
+
+  WiFi.begin(ssid, passphrase);
+
+  if (WiFi.status() != WL_CONNECTED ) {
+    LOG_PORT.println(F("WiFi Connect Failed!"));
+    return false;
+  }
+
+  return true;
+}
+
+bool getStationIP() {
   if (config.dhcp) {
     LOG_PORT.print(F("Connecting with DHCP"));
   } else {
@@ -296,6 +462,7 @@ void connectWifi() {
                );
     LOG_PORT.print(F("Connecting with Static IP"));
   }
+  return true;
 }
 
 void onWifiConnect(const WiFiEventStationModeGotIP &event) {
@@ -331,7 +498,7 @@ void onWiFiDisconnect(const WiFiEventStationModeDisconnected &event) {
 
   // Pause MQTT reconnect while WiFi is reconnecting
   mqttTicker.detach();
-  wifiTicker.once(2, connectWifi);
+  wifiTicker.once(2, reconnectStationWifi);
 }
 
 // Subscribe to "n" universes, starting at "universe"
@@ -350,12 +517,58 @@ void multiSub() {
   }
 }
 
+bool startSoftAP() {
+  LOG_PORT.println(F("**** FAILED TO ASSOCIATE WITH AP, GOING SOFTAP ****"));
+  //setStatic(255,255,0);
+
+  //if (config.ap_fallback) {
+  asAP = true;
+
+  WiFi.mode(WIFI_AP);
+  WiFiMode_t wMode = WiFi.getMode();
+  if ( wMode != WIFI_AP && wMode != WIFI_AP_STA ) {
+    LOG_PORT.println(F("Cannot start SoftAP, WiFi mode is incorrect"));
+    return false;
+  }
+  String ssid = WiFi.hostname();
+  if ( config.hostname.length() )
+    ssid = "ESPixelStick " + String(config.hostname);
+
+  LOG_PORT.println(
+    WiFi.softAPConfig(ap_ip, ap_ip, ap_subnet) &&
+    WiFi.softAP(ssid.c_str()) ? F("SoftAP Ready") : F("SoftAP Failed!"));
+  LOG_PORT.print(F("MAC address = "));
+  LOG_PORT.println(WiFi.softAPmacAddress().c_str());
+
+  // if DNSServer is started with "*" for domain name,
+  // it will reply with the provided IP to all DNS requests
+  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+  LOG_PORT.print(F("IP Address: "));
+  LOG_PORT.println(WiFi.softAPIP());
+
+}
+
+
+
 /////////////////////////////////////////////////////////
 //
 //  MQTT Section
 //
 /////////////////////////////////////////////////////////
 
+
+void initMQTT() {
+  // Setup MQTT Handlers
+  if (config.mqtt) {
+    mqtt.onConnect(onMqttConnect);
+    mqtt.onDisconnect(onMqttDisconnect);
+    mqtt.onMessage(onMqttMessage);
+    mqtt.setServer(config.mqtt_ip.c_str(), config.mqtt_port);
+    if (config.mqtt_user.length() > 0)
+      mqtt.setCredentials(config.mqtt_user.c_str(), config.mqtt_password.c_str());
+  }
+}
 void connectToMqtt() {
   LOG_PORT.print(F("- Connecting to MQTT Broker "));
   LOG_PORT.println(config.mqtt_ip);
@@ -485,11 +698,13 @@ void initWeb() {
 
   // Heap status handler
   web.on("/heap", HTTP_GET, [](AsyncWebServerRequest * request) {
+    LOG_PORT.println(F("GET /heap request"));
     request->send(200, "text/plain", String(ESP.getFreeHeap()));
   });
 
   // JSON Config Handler
   web.on("/conf", HTTP_GET, [](AsyncWebServerRequest * request) {
+    LOG_PORT.println(F("GET /conf request"));
     String jsonString;
     serializeConfig(jsonString, true);
     request->send(200, "text/json", jsonString);
@@ -497,6 +712,7 @@ void initWeb() {
 
   // gamma debugging Config Handler
   web.on("/gamma", HTTP_GET, [](AsyncWebServerRequest * request) {
+    LOG_PORT.println(F("GET /gamma request"));
     AsyncResponseStream *response = request->beginResponseStream("text/plain");
     for (int i = 0; i < 256; i++) {
       response->printf ("%5d,", GAMMA_TABLE[i]);
@@ -509,14 +725,16 @@ void initWeb() {
 
   // Firmware upload handler
   web.on("/updatefw", HTTP_POST, [](AsyncWebServerRequest * request) {
+    LOG_PORT.println(F("POST /updatefw request"));
     ws.textAll("X6");
   }, handle_fw_upload);
 
   // Static Handler
   web.serveStatic("/", SPIFFS, "/www/").setDefaultFile("index.html");
-  //web.serveStatic("/config.json", SPIFFS, "/config.json");
+  web.serveStatic("/config.json", SPIFFS, "/config.json");
 
   web.onNotFound([](AsyncWebServerRequest * request) {
+    LOG_PORT.println(F("GET NOT_FOUND request"));
     request->send(404, "text/plain", "Page not found");
   });
 
@@ -613,8 +831,9 @@ void validateConfig() {
   else if (config.baudrate < BaudRate::BR_38400)
     config.baudrate = BaudRate::BR_57600;
 #endif
+  config.testmode = TestMode::DISABLED;
 }
-
+void initPixels();
 void updateConfig() {
   // Validate first
   validateConfig();
@@ -626,29 +845,12 @@ void updateConfig() {
   else
     uniLast = config.universe + span / config.universe_limit - 1;
 
-  // Setup the sequence error tracker
-  uint8_t uniTotal = (uniLast + 1) - config.universe;
+  //if the universe changed sizes
+  initE131();
 
-  if (seqTracker) free(seqTracker);
-  if ((seqTracker = static_cast<uint8_t *>(malloc(uniTotal))))
-    memset(seqTracker, 0x00, uniTotal);
+  initPixels();
 
-  if (seqError) free(seqError);
-  if ((seqError = static_cast<uint32_t *>(malloc(uniTotal * 4))))
-    memset(seqError, 0x00, uniTotal * 4);
-
-  // Zero out packet stats
-  e131.stats.num_packets = 0;
-
-  // Initialize for our pixel type
-#if defined(ESPS_MODE_PIXEL)
-  pixels.begin(config.pixel_type, config.pixel_color, config.channel_count / 3);
-  pixels.setGamma(config.gamma);
-  updateGammaTable(config.gammaVal, config.briteVal);
-#elif defined(ESPS_MODE_SERIAL)
-  serial.begin(&SEROUT_PORT, config.serial_type, config.channel_count, config.baudrate);
-#endif
-
+  
   LOG_PORT.print(F("- Listening for "));
   LOG_PORT.print(config.channel_count);
   LOG_PORT.print(F(" channels, from Universe "));
@@ -656,10 +858,21 @@ void updateConfig() {
   LOG_PORT.print(F(" to "));
   LOG_PORT.println(uniLast);
 
-  // Setup IGMP subscriptions if multicast is enabled
-  if (config.multicast)
-    multiSub();
 }
+
+// Initialize for our pixel type
+#if defined(ESPS_MODE_PIXEL)
+void initPixels() {
+  pixels.begin(config.pixel_type, config.pixel_color, config.channel_count / 3);
+  LOG_PORT.printf("Set Gamma: %0.2f, GammaVal: %0.2f, Brightness: %0.2f\n",config.gamma,config.gammaVal,config.briteVal);
+  pixels.setGamma(config.gamma);
+  updateGammaTable(config.gammaVal, config.briteVal);
+}
+#elif defined(ESPS_MODE_SERIAL)
+void initPixels() {
+  serial.begin(&SEROUT_PORT, config.serial_type, config.channel_count, config.baudrate);
+}
+#endif
 
 // De-Serialize Network config
 void dsNetworkConfig(JsonObject &json) {
@@ -897,183 +1110,195 @@ void saveConfig() {
 //
 /////////////////////////////////////////////////////////
 
-void setStatic(uint8_t r, uint8_t g, uint8_t b) {
-  uint16_t i = 0;
-  while (i <= config.channel_count - 3) {
-#if defined(ESPS_MODE_PIXEL)
-    pixels.setValue(i++, r);
-    pixels.setValue(i++, g);
-    pixels.setValue(i++, b);
-#elif defined(ESPS_MODE_SERIAL)
-    serial.setValue(i++, r);
-    serial.setValue(i++, g);
-    serial.setValue(i++, b);
-#endif
-  }
+void setStatic(uint8_t r, uint8_t g, uint8_t b,uint8_t waitTime) {
+  LOG_PORT.printf("setStatic(%d,%d,%d,%d)\n",r,g,b,waitTime);
+  setStatic(r,g,b);
+  sceneShow();
+  delay(waitTime);
 }
 
-
+void setStatic(uint8_t r, uint8_t g, uint8_t b) {
+  LOG_PORT.printf("setStatic(%d,%d,%d)\n",r,g,b);
+  uint16_t i = 0;
+  while (i <= config.channel_count - 3) {
+    pixels.setValue(i,r);
+    setPixelValue(i++, r);
+    setPixelValue(i++, g);
+    setPixelValue(i++, b);
+  }
+}
 /////////////////////////////////////////////////////////
 //
 //  Main Loop
 //
 /////////////////////////////////////////////////////////
 void loop() {
-  e131_packet_t packet;
+  if (asAP && millis() - asAPLastColor > 500 ) {
+    asAPLastColor = millis();
+    if ( asAPColorOn ) {
+      setStatic(255, 255, 0);
+    } else {
+      setStatic(0, 0, 0);
+    }
+    asAPColorOn = ! asAPColorOn;
+  }
 
   // Reboot handler
-  if (reboot) {
-    delay(REBOOT_DELAY);
-    ESP.restart();
-  }
+  if (reboot) doReboot();
 
   if (config.testmode == TestMode::DISABLED || config.testmode == TestMode::VIEW_STREAM) {
-    // Parse a packet and update pixels
-    if (!e131.isEmpty()) {
-      e131.pull(&packet);
-      uint16_t universe = htons(packet.universe);
-      uint8_t *data = packet.property_values + 1;
-      if ((universe >= config.universe) && (universe <= uniLast)) {
-        // Universe offset and sequence tracking
-        uint8_t uniOffset = (universe - config.universe);
-        if (packet.sequence_number != seqTracker[uniOffset]++) {
-          seqError[uniOffset]++;
-          seqTracker[uniOffset] = packet.sequence_number + 1;
-        }
-
-        // Offset the channels if required
-        uint16_t offset = 0;
-        offset = config.channel_start - 1;
-
-        // Find start of data based off the Universe
-        int16_t dataStart = uniOffset * config.universe_limit - offset;
-
-        // Calculate how much data we need for this buffer
-        uint16_t dataStop = config.channel_count;
-        uint16_t channels = htons(packet.property_value_count) - 1;
-        if (config.universe_limit < channels)
-          channels = config.universe_limit;
-        if ((dataStart + channels) < dataStop)
-          dataStop = dataStart + channels;
-
-        // Set the data
-        uint16_t buffloc = 0;
-
-        // ignore data from start of first Universe before channel_start
-        if (dataStart < 0) {
-          dataStart = 0;
-          buffloc = config.channel_start - 1;
-        }
-
-        for (int i = dataStart; i < dataStop; i++) {
-#if defined(ESPS_MODE_PIXEL)
-          pixels.setValue(i, data[buffloc]);
-#elif defined(ESPS_MODE_SERIAL)
-          serial.setValue(i, data[buffloc]);
-#endif
-          buffloc++;
-        }
-      }
-    }
+    handleE131();
+    if ( ! firstMessage )
+      handleDefaultPattern();
   } else {  // Other testmodes
-    switch (config.testmode) {
-      case TestMode::STATIC: {
-          setStatic(testing.r, testing.g, testing.b);
-          break;
-        }
-
-      case TestMode::CHASE:
-        // Run chase routine
-        if (millis() - testing.last > 100) {
-          // Rime for new step
-          testing.last = millis();
-#if defined(ESPS_MODE_PIXEL)
-          // Clear whole string
-          for (int y = 0; y < config.channel_count; y++)
-            pixels.setValue(y, 0);
-          // Set pixel at step
-          int ch_offset = testing.step * 3;
-          pixels.setValue(ch_offset++, testing.r);
-          pixels.setValue(ch_offset++, testing.g);
-          pixels.setValue(ch_offset, testing.b);
-          testing.step++;
-          if (testing.step >= (config.channel_count / 3))
-            testing.step = 0;
-#elif defined(ESPS_MODE_SERIAL)
-          for (int y = 0; y < config.channel_count; y++)
-            serial.setValue(y, 0);
-          // Set pixel at step
-          serial.setValue(testing.step++, 0xFF);
-          if (testing.step >= config.channel_count)
-            testing.step = 0;
-#endif
-        }
-        break;
-
-      case TestMode::RAINBOW:
-        // Run rainbow routine
-        if (millis() - testing.last > 50) {
-          testing.last = millis();
-          uint16_t i, WheelPos, num_pixels;
-          num_pixels = config.channel_count / 3;
-          if (testing.step > 255) {
-            testing.step = 0;
-          }
-          for (i = 0; i < (num_pixels); i++) {
-            int ch_offset = i * 3;
-            WheelPos = 255 - (((i * 255 / num_pixels) + testing.step) & 255);
-#if defined(ESPS_MODE_PIXEL)
-            if (WheelPos < 85) {
-              pixels.setValue(ch_offset++, 255 - WheelPos * 3);
-              pixels.setValue(ch_offset++, 0);
-              pixels.setValue(ch_offset, WheelPos * 3);
-            } else if (WheelPos < 170) {
-              WheelPos -= 85;
-              pixels.setValue(ch_offset++, 0);
-              pixels.setValue(ch_offset++, WheelPos * 3);
-              pixels.setValue(ch_offset, 255 - WheelPos * 3);
-            } else {
-              WheelPos -= 170;
-              pixels.setValue(ch_offset++, WheelPos * 3);
-              pixels.setValue(ch_offset++, 255 - WheelPos * 3);
-              pixels.setValue(ch_offset, 0);
-            }
-#elif defined(ESPS_MODE_SERIAL)
-            if (WheelPos < 85) {
-              serial.setValue(ch_offset++, 255 - WheelPos * 3);
-              serial.setValue(ch_offset++, 0);
-              serial.setValue(ch_offset, WheelPos * 3);
-            } else if (WheelPos < 170) {
-              WheelPos -= 85;
-              serial.setValue(ch_offset++, 0);
-              serial.setValue(ch_offset++, WheelPos * 3);
-              serial.setValue(ch_offset, 255 - WheelPos * 3);
-            } else {
-              WheelPos -= 170;
-              serial.setValue(ch_offset++, WheelPos * 3);
-              serial.setValue(ch_offset++, 255 - WheelPos * 3);
-              serial.setValue(ch_offset, 0);
-            }
-#endif
-          }
-
-          testing.step++;
-        }
-        break;
-    }
+    handleTestMode();
   }
-
   /* Streaming refresh */
-#if defined(ESPS_MODE_PIXEL)
-  if (pixels.canRefresh())
-    pixels.show();
-#elif defined(ESPS_MODE_SERIAL)
-  if (serial.canRefresh())
-    serial.show();
-#endif
-
+  refresh();
   /* Update the PWM outputs */
 #if defined(ESPS_SUPPORT_PWM)
   handlePWM();
 #endif
 }
+
+void handleDefaultPattern() {
+}
+void handleTestMode() {
+  switch (config.testmode) {
+    case TestMode::STATIC: {
+        //LOG_PORT.print("S");
+        setStatic(testing.r, testing.g, testing.b);
+        break;
+      }
+    case TestMode::CHASE: {
+        testModeChase();
+        break;
+      }
+    case TestMode::RAINBOW: {
+        testModeRainbow();
+        break;
+      }
+  }
+}
+
+void handleE131() {
+  e131_packet_t packet;
+  if (e131.isEmpty()) return;
+  if ( ! firstMessage ) firstMessage = true;
+  lastE131Request = millis();
+  //LOG_PORT.print("E");
+
+  // Parse a packet and update pixels
+  e131.pull(&packet);
+  uint16_t universe = htons(packet.universe);
+  uint8_t *data = packet.property_values + 1;
+  if ( universe < config.universe || universe > uniLast ) return;
+  // Universe offset and sequence tracking
+  uint8_t uniOffset = (universe - config.universe);
+  if (packet.sequence_number != seqTracker[uniOffset]++) {
+    seqError[uniOffset]++;
+    seqTracker[uniOffset] = packet.sequence_number + 1;
+  }
+
+  // Offset the channels if required
+  uint16_t offset = 0;
+  offset = config.channel_start - 1;
+
+  // Find start of data based off the Universe
+  int16_t dataStart = uniOffset * config.universe_limit - offset;
+
+  // Calculate how much data we need for this buffer
+  uint16_t dataStop = config.channel_count;
+  uint16_t channels = htons(packet.property_value_count) - 1;
+  if (config.universe_limit < channels)
+    channels = config.universe_limit;
+  if ((dataStart + channels) < dataStop)
+    dataStop = dataStart + channels;
+
+  // Set the data
+  uint16_t buffloc = 0;
+
+  // ignore data from start of first Universe before channel_start
+  if (dataStart < 0) {
+    dataStart = 0;
+    buffloc = config.channel_start - 1;
+  }
+
+  for (int i = dataStart; i < dataStop; i++) {
+    setPixelValue(i, data[buffloc++]);
+  }
+}
+
+
+void doChase();
+
+void testModeChase() {
+  //LOG_PORT.print("C");
+  // Run chase routine
+  if (millis() - testing.last > 100) {
+    // Rime for new step
+    testing.last = millis();
+    doChase();
+  }
+}
+
+#if defined(ESPS_MODE_PIXEL)
+void doChase() {
+  // Clear whole string
+  for (int y = 0; y < config.channel_count; y++)
+    pixels.setValue(y, 0);
+  // Set pixel at step
+  int ch_offset = testing.step * 3;
+  pixels.setValue(ch_offset++, testing.r);
+  pixels.setValue(ch_offset++, testing.g);
+  pixels.setValue(ch_offset, testing.b);
+  testing.step++;
+  if (testing.step >= (config.channel_count / 3))
+    testing.step = 0;
+
+}
+#elif defined(ESPS_MODE_SERIAL)
+void doChase() {
+  for (int y = 0; y < config.channel_count; y++)
+    serial.setValue(y, 0);
+  // Set pixel at step
+  serial.setValue(testing.step++, 0xFF);
+  if (testing.step >= config.channel_count)
+    testing.step = 0;
+}
+#endif
+
+void doRainbow();
+void testModeRainbow () {
+  //LOG_PORT.print("R");
+  // Run rainbow routine
+  if (millis() - testing.last < 50) return;
+  testing.last = millis();
+  uint16_t i, WheelPos, num_pixels;
+  num_pixels = config.channel_count / 3;
+  if (testing.step > 255) {
+    testing.step = 0;
+  }
+  for (i = 0; i < (num_pixels); i++) {
+    int ch_offset = i * 3;
+    WheelPos = 255 - (((i * 255 / num_pixels) + testing.step) & 255);
+    if (WheelPos < 85) {
+      setPixelValue(ch_offset++, 255 - WheelPos * 3);
+      setPixelValue(ch_offset++, 0);
+      setPixelValue(ch_offset, WheelPos * 3);
+    } else if (WheelPos < 170) {
+      WheelPos -= 85;
+      setPixelValue(ch_offset++, 0);
+      setPixelValue(ch_offset++, WheelPos * 3);
+      setPixelValue(ch_offset, 255 - WheelPos * 3);
+    } else {
+      WheelPos -= 170;
+      setPixelValue(ch_offset++, WheelPos * 3);
+      setPixelValue(ch_offset++, 255 - WheelPos * 3);
+      setPixelValue(ch_offset, 0);
+    }
+  }
+  testing.step++;
+}
+
+

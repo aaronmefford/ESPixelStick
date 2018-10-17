@@ -253,8 +253,8 @@ const uint8_t* ICACHE_RAM_ATTR PixelDriver::fillWS2811(const uint8_t *buff,
     return buff;
 }
 
-void ICACHE_RAM_ATTR PixelDriver::show() {
-    if (!pixdata) return;
+bool ICACHE_RAM_ATTR PixelDriver::show() {
+    if (!pixdata) return false;
 
     if (type == PixelType::WS2811) {
         uart_buffer = pixdata;
@@ -298,6 +298,7 @@ void ICACHE_RAM_ATTR PixelDriver::show() {
             SET_PERI_REG_MASK(UART_CONF0(UART), UART_TXD_BRK);
         }
     }
+    return true;
 }
 
 uint8_t* PixelDriver::getData() {

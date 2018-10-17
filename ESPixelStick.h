@@ -182,6 +182,7 @@ void onMqttMessage(char* topic, char* p_payload,
 void publishRGBState();
 void publishRGBBrightness();
 void publishRGBColor();
+void setStatic(uint8_t r, uint8_t g, uint8_t b,uint8_t waitTime);
 void setStatic(uint8_t r, uint8_t g, uint8_t b);
 
 #endif /* ESPIXELSTICK_H_ */

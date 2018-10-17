@@ -165,8 +165,8 @@ void ICACHE_RAM_ATTR SerialDriver::serial_handle(void *param) {
 }
 
 
-void SerialDriver::show() {
-    if (!_serialdata) return;
+bool SerialDriver::show() {
+    if (!_serialdata) return false;
 
     uart_buffer = _serialdata;
     uart_buffer_tail = _serialdata + _size;
@@ -185,6 +185,7 @@ void SerialDriver::show() {
     /* Copy data to the idle buffer and swap it */
     memcpy(_asyncdata, _serialdata, _size);
     std::swap(_asyncdata, _serialdata);
+    return true;
 }
 
 
